@@ -90,18 +90,32 @@ import com.reactnativecommunity.webview.events.TopRenderProcessGoneEvent;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.SequenceInputStream;
 import java.io.UnsupportedEncodingException;
 import java.lang.IllegalArgumentException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
+
+import okhttp3.Call;
+import okhttp3.Headers;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 
 /**
  * Manages instances of {@link WebView}
@@ -684,7 +698,12 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   @Override
   protected void addEventEmitters(ThemedReactContext reactContext, WebView view) {
     // Do not register default touch emitter and let WebView implementation handle touches
-    view.setWebViewClient(new RNCWebViewClient());
+    RNCWebViewClient client = new RNCWebViewClient();
+
+    if( ((RNCWebView) view).injectedJS != null){
+      client.setInjectedJavaScript(((RNCWebView) view).injectedJS);
+    }
+    view.setWebViewClient(client);
   }
 
   @Override
@@ -905,7 +924,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   }
 
   protected static class RNCWebViewClient extends WebViewClient {
-
+    protected String mInjectedJavaScript = null;
     protected boolean mLastLoadFailed = false;
     protected @Nullable
     ReadableArray mUrlPrefixesForDefaultIntent;
@@ -915,6 +934,10 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
     public void setIgnoreErrFailedForThisURL(@Nullable String url) {
       ignoreErrFailedForThisURL = url;
+    }
+
+    public void setInjectedJavaScript(String injectedJavaScript){
+      mInjectedJavaScript = "<script type=\"text/javascript\">" + injectedJavaScript + "</script>";
     }
 
     public void setBasicAuthCredential(@Nullable BasicAuthCredential credential) {
@@ -1191,6 +1214,73 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
     public void setProgressChangedFilter(RNCWebView.ProgressChangedFilter filter) {
       progressChangedFilter = filter;
+    }
+    private WebResourceResponse injectToIframe(WebResourceRequest request){
+      if(!Objects.equals(request.getMethod().toLowerCase(), "get")){
+        Log.d(TAG, "injectToIframe: not get " + request.getMethod() + " " + request.getUrl().toString());
+      }
+      OkHttpClient okHttpClient = new OkHttpClient();
+      final Call call = okHttpClient.newCall(new Request.Builder()
+        .url(request.getUrl().toString())
+        .method(request.getMethod(),null)
+        .headers(Headers.of(request.getRequestHeaders()))
+        .build()
+      );
+      try {
+        final Response response = call.execute();
+        response.headers();// get response header here
+
+        String mimeType = response.header("content-type", "text/plain").split(";")[0];
+        mimeType = mimeType.trim();
+        String encoding = response.header("content-encoding", "utf-8");
+
+        if(!Objects.equals(mimeType.toLowerCase(), "text/html")){
+          Log.d(TAG, "injectToIframe: not html " + mimeType + " " + request.getUrl().toString());
+          return null;
+        }
+        if(response.code()>=300){
+          Log.d(TAG, "injectToIframe: not success " + response.code() + " " + request.getUrl().toString());
+          return null;
+        }
+        Log.d(TAG, "injectToIframe: inject " + mimeType + " " + request.getUrl().toString());
+
+        InputStream resultStream;
+        if(mInjectedJavaScript == null){
+          resultStream = response.body().byteStream();
+        }else{
+          List<InputStream> streams = Arrays.asList(
+            response.body().byteStream(),
+            new ByteArrayInputStream(mInjectedJavaScript.getBytes())
+          );
+          resultStream =  new SequenceInputStream(Collections.enumeration(streams));
+        }
+
+        Map<String,String> responseHeader = new HashMap<>();
+        Headers headers = response.headers();
+        Map<String, List<String>> headersMap = headers.toMultimap();
+        if (headersMap.size() > 0) {
+          for (String name : headers.names()) {
+            for (String value : headersMap.get(name)) {
+              responseHeader.put(name, value);
+            }
+          }
+        }
+
+        // TODO other type
+        return new WebResourceResponse(mimeType, encoding, 200, "OK", responseHeader,resultStream);
+      } catch (IOException e) {
+        e.printStackTrace();
+        return null;
+      }
+    }
+    @Nullable
+    @Override
+    public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+      if(request.isForMainFrame()){
+        return  super.shouldInterceptRequest(view, request);
+      }
+      return injectToIframe(request);
+
     }
   }
 
@@ -1620,6 +1710,9 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
     public void setInjectedJavaScript(@Nullable String js) {
       injectedJS = js;
+      if(mRNCWebViewClient != null){
+        mRNCWebViewClient.setInjectedJavaScript(js);
+      }
     }
 
     public void setInjectedJavaScriptBeforeContentLoaded(@Nullable String js) {

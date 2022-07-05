@@ -1218,7 +1218,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     private WebResourceResponse injectToIframe(WebResourceRequest request){
       if(!Objects.equals(request.getMethod().toLowerCase(), "get")){
         Log.d(TAG, "injectToIframe: not get " + request.getMethod() + " " + request.getUrl().toString());
-        return;
+        return null;
       }
       OkHttpClient okHttpClient = new OkHttpClient();
       final Call call = okHttpClient.newCall(new Request.Builder()
